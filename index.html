@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Three.js FPS - Ladder Climbing</title>
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      font-family: sans-serif;
+      user-select: none;
+    }
+
+    #ui-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+    }
+
+    #crosshair {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 20px;
+      height: 20px;
+      transform: translate(-50%, -50%);
+    }
+
+    #crosshair::before,
+    #crosshair::after {
+      content: '';
+      position: absolute;
+      background: #0f0;
+    }
+
+    #crosshair::before {
+      top: 9px;
+      left: 0;
+      width: 20px;
+      height: 2px;
+    }
+
+    #crosshair::after {
+      top: 0;
+      left: 9px;
+      width: 2px;
+      height: 20px;
+    }
+
+    #blocker {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      background-color: rgba(0, 0, 0, 0.5);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      z-index: 10;
+      pointer-events: auto;
+    }
+
+    #instructions {
+      font-size: 36px;
+      cursor: pointer;
+    }
+
+    #controls-info {
+      margin-top: 20px;
+      font-size: 16px;
+      text-align: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="ui-layer">
+    <div id="crosshair"></div>
+  </div>
+
+  <div id="blocker">
+    <div id="instructions">클릭하여 시작</div>
+    <div id="controls-info">
+      W, A, S, D : 이동 | SPACE : 점프 | TAB : 시점 전환<br>
+      <span style="color: cyan;">사다리에 붙어서 W를 누르면 올라갑니다.</span><br>
+      (사다리는 어두운 회색으로 건물 벽에 붙어있습니다)
+    </div>
+  </div>
+
+  <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "cannon-es": "https://unpkg.com/cannon-es@0.20.0/dist/cannon-es.js"
+            }
+        }
+    </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { PointerLockControls } from 'three/addons/controls/PointerLockControls.js';
+    import * as CANNON from 'cannon-es';
+
+    // ==========================================
+    // 1. Weapon, PhysicsManager, Zombie, EnemyManager
+    // (이전 코드와 동일하므로 압축 유지)
+    // ==========================================
+    class Weapon {
+      constructor(scene) {
+        this.scene = scene;
+        this.fireRate = 0.1; this.nextFireTime = 0; this.isFiring = false;
+        this.recoilAngle = 0; this.currentRecoilSim = 0; this.flashDuration = 0.08; this.flashTimer = 0;
+        this.raycaster = new THREE.Raycaster(); this.raycaster.far = 200;
+        this.mesh = this._createAK47();
+      }
+      _createAK47() {
+        const gunGroup = new THREE.Group();
+        const woodMat = new THREE.MeshStandardMaterial({ color: 0x8B4513 });
+        const metalMat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.2 });
+        const body = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.6), metalMat);
+        const stock = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.14, 0.35), woodMat);
+        stock.position.set(0, -0.05, 0.45);
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.025, 0.65, 8), metalMat);
+        barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0.08, -0.5);
+        const mag = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.35, 0.15), metalMat);
+        mag.position.set(0, -0.25, -0.1); mag.rotation.x = 0.4;
+        gunGroup.add(body, stock, barrel, mag);
+        const flashGeo = new THREE.DodecahedronGeometry(0.2, 0);
+        const flashMat = new THREE.MeshBasicMaterial({ color: 0xffdd44, transparent: true, opacity: 0.9, depthWrite: false });
+        this.flashMesh = new THREE.Mesh(flashGeo, flashMat);
+        this.flashMesh.position.set(0, 0.08, -1.0); this.flashMesh.visible = false;
+        gunGroup.add(this.flashMesh);
+        this.flashLight = new THREE.PointLight(0xffaa00, 0, 15);
+        this.flashLight.position.set(0, 0.1, -1.1);
+        gunGroup.add(this.flashLight);
+        return gunGroup;
+      }
+      startFiring() { this.isFiring = true; }
+      stopFiring() { this.isFiring = false; }
+      update(delta, time, targetObjects, pivot) {
+        if (this.isFiring && time >= this.nextFireTime) { this.fire(targetObjects, pivot); this.nextFireTime = time + this.fireRate; }
+        if (this.flashTimer > 0) { this.flashTimer -= delta; if (this.flashTimer <= 0) { this.flashMesh.visible = false; this.flashLight.intensity = 0; } }
+        pivot.rotation.x -= this.recoilAngle;
+        this.currentRecoilSim = THREE.MathUtils.lerp(this.currentRecoilSim, 0, delta * 10);
+        this.recoilAngle = this.currentRecoilSim;
+        pivot.rotation.x += this.recoilAngle;
+        if (this.targetPos) {
+          this.mesh.position.z = THREE.MathUtils.lerp(this.mesh.position.z, this.targetPos.z, delta * 15);
+          this.mesh.rotation.x = THREE.MathUtils.lerp(this.mesh.rotation.x, this.targetRot.x, delta * 15);
+        }
+      }
+      fire(targetObjects, pivot) {
+        this.currentRecoilSim += 0.02; this.mesh.position.z += 0.15; this.mesh.rotation.x += 0.1;
+        this.flashMesh.visible = true; this.flashMesh.rotation.z = Math.random() * Math.PI;
+        this.flashMesh.scale.setScalar(0.8 + Math.random() * 0.5); this.flashLight.intensity = 3.0; this.flashTimer = this.flashDuration;
+        const direction = new THREE.Vector3(0, 0, -1); direction.applyQuaternion(pivot.quaternion);
+        this.raycaster.set(pivot.position, direction);
+        const intersects = this.raycaster.intersectObjects(targetObjects, true);
+        if (intersects.length > 0) {
+          const hit = intersects[0];
+          let target = hit.object;
+          while (target) {
+            if (target.userData && target.userData.isEnemy) { target.userData.entity.takeDamage(); this.createBloodEffect(hit.point, hit.face.normal); return; }
+            target = target.parent;
+          }
+          this.createBulletHole(hit.point, hit.face.normal);
+        }
+      }
+      createBulletHole(position, normal) {
+        const geometry = new THREE.BoxGeometry(0.2, 0.2, 0.05); const material = new THREE.MeshBasicMaterial({ color: 0xff2200 });
+        const decal = new THREE.Mesh(geometry, material); decal.position.copy(position); decal.lookAt(position.clone().add(normal)); decal.position.add(normal.clone().multiplyScalar(0.01));
+        this.scene.add(decal); setTimeout(() => { this.scene.remove(decal); geometry.dispose(); material.dispose(); }, 3000);
+      }
+      createBloodEffect(position, normal) {
+        for (let i = 0; i < 5; i++) {
+          const geometry = new THREE.BoxGeometry(0.1, 0.1, 0.1); const material = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+          const part = new THREE.Mesh(geometry, material); part.position.copy(position);
+          part.position.x += (Math.random() - 0.5) * 0.5; part.position.y += (Math.random() - 0.5) * 0.5; part.position.z += (Math.random() - 0.5) * 0.5;
+          this.scene.add(part); setTimeout(() => { this.scene.remove(part); geometry.dispose(); material.dispose(); }, 500);
+        }
+      }
+      setTransformTarget(pos, rot) { this.targetPos = pos.clone(); this.targetRot = rot.clone(); this.mesh.position.copy(this.targetPos); this.mesh.rotation.copy(this.targetRot); }
+    }
+
+    class Zombie {
+      constructor(game, startPosition) {
+        this.game = game; this.health = 5; this.isDead = false; this.speed = 8 + Math.random() * 4;
+        this.mesh = this._createMesh(); this.mesh.position.copy(startPosition); this.game.scene.add(this.mesh);
+        this.body = new CANNON.Body({ mass: 40, position: new CANNON.Vec3(startPosition.x, startPosition.y, startPosition.z), shape: new CANNON.Sphere(1.0), material: game.physics.defaultMaterial, fixedRotation: true, linearDamping: 0.9 });
+        this.game.physics.world.addBody(this.body);
+      }
+      _createMesh() {
+        const group = new THREE.Group();
+        const skinMat = new THREE.MeshStandardMaterial({ color: 0x556b2f, roughness: 0.8 });
+        const clothesMat = new THREE.MeshStandardMaterial({ color: 0x3d3d3d, roughness: 0.9 });
+        const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.4, 0.6), clothesMat); body.position.y = 0.7; body.castShadow = true;
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), skinMat); head.position.y = 1.7; head.castShadow = true;
+        const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, 0.3), skinMat); leftArm.position.set(-0.65, 1.2, 0.4); leftArm.rotation.x = -Math.PI / 2;
+        const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, 0.3), skinMat); rightArm.position.set(0.65, 1.2, 0.4); rightArm.rotation.x = -Math.PI / 2;
+        group.add(body, head, leftArm, rightArm);
+        group.traverse((child) => { if (child.isMesh) { child.userData.isEnemy = true; child.userData.entity = this; } });
+        return group;
+      }
+      takeDamage() {
+        if (this.isDead) return;
+        this.health--;
+        this.mesh.children.forEach(child => { if (child.material) { const oldColor = child.material.color.getHex(); child.material.color.setHex(0xff0000); setTimeout(() => { if (!this.isDead && child.material) child.material.color.setHex(oldColor); }, 100); } });
+        if (this.health <= 0) this.die(); else this.body.velocity.y += 5;
+      }
+      die() { this.isDead = true; this.mesh.rotation.x = -Math.PI / 2; this.mesh.position.y -= 0.5; this.game.physics.world.removeBody(this.body); }
+      update(playerPos) {
+        if (this.isDead) return;
+        this.mesh.position.copy(this.body.position); this.mesh.position.y -= 1.0;
+        this.mesh.lookAt(playerPos.x, this.mesh.position.y, playerPos.z);
+        const direction = new THREE.Vector3(playerPos.x - this.body.position.x, 0, playerPos.z - this.body.position.z).normalize();
+        this.body.velocity.x = direction.x * this.speed; this.body.velocity.z = direction.z * this.speed;
+      }
+    }
+
+    class EnemyManager {
+      constructor(game) { this.game = game; this.zombies = []; this.maxZombies = 10; this.spawnTimer = 0; this.spawnInterval = 2.0; }
+      update(delta, playerPos) {
+        for (let i = this.zombies.length - 1; i >= 0; i--) {
+          const zombie = this.zombies[i]; zombie.update(playerPos);
+          if (zombie.isDead) { if (!zombie.deathTimer) zombie.deathTimer = 0; zombie.deathTimer += delta; if (zombie.deathTimer > 2.0) { this.game.scene.remove(zombie.mesh); this.zombies.splice(i, 1); } }
+        }
+        this.spawnTimer += delta;
+        if (this.spawnTimer > this.spawnInterval) { this.spawnTimer = 0; if (this.zombies.length < this.maxZombies) this.spawnZombie(playerPos); }
+      }
+      spawnZombie(playerPos) {
+        const angle = Math.random() * Math.PI * 2; const distance = 20 + Math.random() * 20;
+        const x = playerPos.x + Math.cos(angle) * distance; const z = playerPos.z + Math.sin(angle) * distance;
+        this.zombies.push(new Zombie(this.game, new THREE.Vector3(x, 10, z)));
+      }
+      getMeshList() { return this.zombies.map(z => z.mesh); }
+    }
+
+    class PhysicsManager {
+      constructor() {
+        this.world = new CANNON.World(); this.world.gravity.set(0, -50, 0);
+        this.world.broadphase = new CANNON.NaiveBroadphase(); this.defaultMaterial = new CANNON.Material('default');
+        this.world.addContactMaterial(new CANNON.ContactMaterial(this.defaultMaterial, this.defaultMaterial, { friction: 0.0, restitution: 0.0 }));
+      }
+      update(delta) { this.world.step(1 / 60, delta, 3); }
+    }
+
+    // ==========================================
+    // 2. Player Class (사다리 타기 로직 추가)
+    // ==========================================
+    class Player {
+      constructor(game, domElement) {
+        this.game = game; this.camera = game.camera; this.scene = game.scene;
+        this.pivot = new THREE.Object3D(); this.pivot.position.y = 1.6; this.scene.add(this.pivot); this.pivot.add(this.camera);
+        this.controls = new PointerLockControls(this.pivot, domElement);
+        this.input = { forward: false, backward: false, left: false, right: false };
+        this.canJump = false; this.isThirdPerson = false;
+
+        this.isOnLadder = false;
+
+        // [추가] 달리기 관련 변수
+        this.isSprinting = false;       // 현재 달리기 중인지
+        this.lastWKeyPressTime = 0;     // 마지막으로 W를 누른 시간
+        this.walkSpeed = 25;            // 걷는 속도
+        this.runSpeed = 50;             // 달리는 속도 (2배)
+
+        this.weapon = new Weapon(game.scene);
+        this.playerMesh = this._createPlayerMesh(); this.scene.add(this.playerMesh);
+
+        const radius = 1.3;
+        this.shape = new CANNON.Sphere(radius);
+
+        // [중요] 이전 질문에서 요청한 빠른 낙하 적용 (linearDamping: 0.01)
+        this.body = new CANNON.Body({ mass: 50, position: new CANNON.Vec3(0, 30, 0), shape: this.shape, material: game.physics.defaultMaterial, fixedRotation: true, linearDamping: 0.01 });
+        game.physics.world.addBody(this.body);
+
+        const contactNormal = new CANNON.Vec3(); const upAxis = new CANNON.Vec3(0, 1, 0);
+        this.body.addEventListener('collide', (e) => {
+          const contact = e.contact;
+          if (contact.bi.id === this.body.id) contact.ni.negate(contactNormal); else contactNormal.copy(contact.ni);
+          if (contactNormal.dot(upAxis) > 0.5) this.canJump = true;
+        });
+        this._setFirstPersonView(); this._addEventListeners();
+      }
+
+      _createPlayerMesh() {
+        const group = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 1.8, 0.8), new THREE.MeshStandardMaterial({ color: 0x0055ff, roughness: 0.5 })); body.position.y = 0.9; body.castShadow = true;
+        const head = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.7, 0.7), new THREE.MeshStandardMaterial({ color: 0xffccaa, roughness: 0.5 })); head.position.y = 2.1; head.castShadow = true;
+        const eyes = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.1, 0.1), new THREE.MeshStandardMaterial({ color: 0x333333 })); eyes.position.set(0, 2.15, -0.36);
+        group.add(body, head, eyes); return group;
+      }
+
+      _addEventListeners() {
+        const onKeyDown = (e) => {
+          switch (e.code) {
+            case 'KeyW':
+              // [핵심 수정] 키를 꾹 누르고 있을 때 발생하는 자동 반복 신호면 무시
+              if (e.repeat) return;
+
+              // 실제 물리적으로 키를 눌렀을 때만 실행됨
+              const now = performance.now();
+              if (now - this.lastWKeyPressTime < 250) {
+                // 0.25초 안에 다시 눌렀다면 달리기 모드 ON
+                this.isSprinting = true;
+              }
+              this.lastWKeyPressTime = now;
+
+              this.input.forward = true;
+              break;
+
+            case 'KeyA': this.input.left = true; break;
+            case 'KeyS': this.input.backward = true; break;
+            case 'KeyD': this.input.right = true; break;
+            case 'Space': this.jump(); break;
+            case 'Tab': e.preventDefault(); this.toggleView(); break;
+          }
+        };
+
+        const onKeyUp = (e) => {
+          switch (e.code) {
+            case 'KeyW':
+              this.input.forward = false;
+              this.isSprinting = false; // 키를 떼면 달리기 즉시 해제
+              break;
+            case 'KeyA': this.input.left = false; break;
+            case 'KeyS': this.input.backward = false; break;
+            case 'KeyD': this.input.right = false; break;
+          }
+        };
+
+        const onMouseDown = (e) => { if (this.controls.isLocked && e.button === 0) this.weapon.startFiring(); };
+        const onMouseUp = (e) => { if (e.button === 0) this.weapon.stopFiring(); };
+
+        document.addEventListener('keydown', onKeyDown);
+        document.addEventListener('keyup', onKeyUp);
+        document.addEventListener('mousedown', onMouseDown);
+        document.addEventListener('mouseup', onMouseUp);
+      }
+
+      toggleView() { this.isThirdPerson = !this.isThirdPerson; if (this.isThirdPerson) this._setThirdPersonView(); else this._setFirstPersonView(); }
+      _setFirstPersonView() { this.playerMesh.visible = false; this.camera.position.set(0, 0, 0); this.pivot.add(this.weapon.mesh); this.weapon.setTransformTarget(new THREE.Vector3(0.45, -0.4, -0.7), new THREE.Euler(0, 0, 0)); }
+      _setThirdPersonView() { this.playerMesh.visible = true; this.camera.position.set(0, 0.5, 4.0); this.playerMesh.add(this.weapon.mesh); this.weapon.setTransformTarget(new THREE.Vector3(0.6, 1.2, -0.5), new THREE.Euler(0, 0, 0)); }
+
+      jump() {
+        if (this.isOnLadder) {
+          this.body.velocity.y = 10;
+          this.body.velocity.z += 10;
+        } else if (this.canJump) {
+          this.body.velocity.y = Math.sqrt(2 * 50 * 7.0);
+          this.canJump = false;
+        }
+      }
+
+      checkLadderInteraction(ladders) {
+        this.isOnLadder = false;
+        const p = this.body.position;
+        for (let ladder of ladders) {
+          const inX = p.x >= ladder.minX - 0.5 && p.x <= ladder.maxX + 0.5;
+          const inZ = p.z >= ladder.minZ - 0.5 && p.z <= ladder.maxZ + 0.5;
+          const inY = p.y >= ladder.minY && p.y <= ladder.maxY + 1.0;
+
+          if (inX && inZ && inY) {
+            this.isOnLadder = true;
+            break;
+          }
+        }
+      }
+
+      update(delta, time, levelMeshes, enemyMeshes, ladderData) {
+        if (!this.controls.isLocked) return;
+
+        this.checkLadderInteraction(ladderData);
+
+        const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+        euler.setFromQuaternion(this.pivot.quaternion);
+        const yaw = euler.y;
+
+        if (this.isOnLadder) {
+          this.body.velocity.y = 0;
+          const climbSpeed = 10;
+          if (this.input.forward) this.body.velocity.y = climbSpeed;
+          if (this.input.backward) this.body.velocity.y = -climbSpeed;
+          this.body.velocity.x *= 0.5;
+          this.body.velocity.z *= 0.5;
+          this.canJump = true;
+        } else {
+          const inputVector = new CANNON.Vec3(0, 0, 0);
+
+          // [수정] 현재 상태에 따라 속도 결정
+          const currentSpeed = this.isSprinting ? this.runSpeed : this.walkSpeed;
+
+          if (this.input.forward) inputVector.z -= currentSpeed;
+          if (this.input.backward) inputVector.z += currentSpeed;
+          if (this.input.left) inputVector.x -= currentSpeed;
+          if (this.input.right) inputVector.x += currentSpeed;
+
+          const quaternion = new CANNON.Quaternion();
+          quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), yaw);
+          const velocityVector = quaternion.vmult(inputVector);
+          this.body.velocity.x = velocityVector.x;
+          this.body.velocity.z = velocityVector.z;
+        }
+
+        this.pivot.position.copy(this.body.position); this.pivot.position.y += 0.8;
+        this.playerMesh.position.copy(this.body.position); this.playerMesh.position.y -= 1.3;
+        this.playerMesh.rotation.y = yaw;
+
+        const allTargets = levelMeshes.concat(enemyMeshes);
+        this.weapon.update(delta, time, allTargets, this.pivot);
+      }
+    }
+
+    // ==========================================
+    // 3. Level Class (사다리 생성 추가)
+    // ==========================================
+    class Level {
+      constructor(game) {
+        this.game = game;
+        this.meshes = [];
+        this.ladders = []; // 사다리 데이터 저장 (충돌 검사용)
+        this._initLights();
+        this._initCity();
+      }
+      _initLights() {
+        const hemiLight = new THREE.HemisphereLight(0x6666ff, 0x444444, 1.5); this.game.scene.add(hemiLight);
+        const dirLight = new THREE.DirectionalLight(0xaaccff, 2.5); dirLight.position.set(50, 100, 50); dirLight.castShadow = true;
+        dirLight.shadow.camera.left = -100; dirLight.shadow.camera.right = 100; dirLight.shadow.camera.top = 100; dirLight.shadow.camera.bottom = -100;
+        dirLight.shadow.mapSize.width = 2048; dirLight.shadow.mapSize.height = 2048; this.game.scene.add(dirLight);
+      }
+      createObject(mesh, body) { this.game.scene.add(mesh); this.game.physics.world.addBody(body); this.meshes.push(mesh); }
+      _initCity() {
+        const groundGeo = new THREE.PlaneGeometry(1000, 1000);
+        const groundMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.8 });
+        const groundMesh = new THREE.Mesh(groundGeo, groundMat); groundMesh.rotation.x = -Math.PI / 2; groundMesh.receiveShadow = true;
+        this.game.scene.add(groundMesh); this.meshes.push(groundMesh);
+        const groundBody = new CANNON.Body({ mass: 0, material: this.game.physics.defaultMaterial });
+        groundBody.addShape(new CANNON.Plane()); groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        this.game.physics.world.addBody(groundBody);
+
+        const blockSize = 30, gridSize = 10;
+        const buildingColors = [0x888888, 0x5a6a7a, 0x4c5e70, 0x666666, 0x3a4550];
+
+        for (let x = -gridSize; x <= gridSize; x++) {
+          for (let z = -gridSize; z <= gridSize; z++) {
+            if (x === 0 && z === 0) continue;
+            if (Math.random() < 0.3) continue;
+
+            const posX = x * blockSize; const posZ = z * blockSize;
+            const isSkyscraper = Math.random() > 0.7;
+            let width, depth, height;
+            if (isSkyscraper) { width = Math.random() * 10 + 10; depth = Math.random() * 10 + 10; height = Math.random() * 60 + 40; }
+            else { width = Math.random() * 5 + 20; depth = Math.random() * 5 + 20; height = Math.random() * 15 + 10; }
+
+            // 건물 생성
+            const geometry = new THREE.BoxGeometry(width, height, depth);
+            const color = buildingColors[Math.floor(Math.random() * buildingColors.length)];
+            const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.1 });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true; mesh.receiveShadow = true;
+            mesh.position.set(posX, height / 2, posZ);
+            const body = new CANNON.Body({ mass: 0, position: new CANNON.Vec3(posX, height / 2, posZ), material: this.game.physics.defaultMaterial });
+            body.addShape(new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)));
+            this.createObject(mesh, body);
+
+            // [추가] 사다리 생성 (40% 확률)
+            if (Math.random() < 0.4) {
+              this._createLadder(posX, posZ, width, depth, height);
+            }
+          }
+        }
+      }
+
+      _createLadder(bx, bz, bw, bd, bh) {
+        // 건물 4면 중 한 곳 랜덤 선택
+        // 0: +Z (Front), 1: -Z (Back), 2: +X (Right), 3: -X (Left)
+        const side = Math.floor(Math.random() * 4);
+
+        const ladderWidth = 2.0;
+        const ladderDepth = 0.5;
+        let lx = bx, lz = bz;
+        let rotationY = 0;
+
+        // 사다리 위치 계산 (건물 표면에 붙임)
+        const offset = 0.6; // 벽에서 살짝 띄움
+        if (side === 0) { lz += bd / 2 + offset; rotationY = 0; }
+        else if (side === 1) { lz -= bd / 2 + offset; rotationY = Math.PI; }
+        else if (side === 2) { lx += bw / 2 + offset; rotationY = Math.PI / 2; }
+        else if (side === 3) { lx -= bw / 2 + offset; rotationY = -Math.PI / 2; }
+
+        // 1. 사다리 비주얼 생성 (단순하게 긴 박스 2개와 발판들)
+        const ladderGroup = new THREE.Group();
+        const railMat = new THREE.MeshStandardMaterial({ color: 0x222222 }); // 진한 회색
+
+        // 세로 기둥 (Rails)
+        const railGeo = new THREE.BoxGeometry(0.2, bh, 0.2);
+        const leftRail = new THREE.Mesh(railGeo, railMat);
+        leftRail.position.set(-ladderWidth / 2, bh / 2, 0);
+        const rightRail = new THREE.Mesh(railGeo, railMat);
+        rightRail.position.set(ladderWidth / 2, bh / 2, 0);
+
+        // 가로 발판 (Rungs)
+        const rungGeo = new THREE.BoxGeometry(ladderWidth, 0.1, 0.1);
+        const rungCount = Math.floor(bh / 1.0); // 1미터 간격
+        for (let i = 0; i < rungCount; i++) {
+          const rung = new THREE.Mesh(rungGeo, railMat);
+          rung.position.set(0, i * 1.0 + 0.5, 0);
+          ladderGroup.add(rung);
+        }
+
+        ladderGroup.add(leftRail, rightRail);
+        ladderGroup.position.set(lx, 0, lz);
+        ladderGroup.rotation.y = rotationY;
+        this.game.scene.add(ladderGroup);
+        // 사다리 메쉬도 총알 충돌체에 포함 (원하면)
+        this.meshes.push(leftRail, rightRail); // 간단히 레일만 추가
+
+        // 2. 사다리 데이터 저장 (충돌 감지용 AABB)
+        // 회전에 따라 min/max 계산이 다르므로 간단히 중심점과 크기로 계산
+        const hitBoxSize = 1.0; // 사다리 감지 두께
+
+        let minX, maxX, minZ, maxZ;
+
+        if (side === 0 || side === 1) { // Z축 방향 면에 붙음 -> X축으로 넓음
+          minX = lx - ladderWidth / 2;
+          maxX = lx + ladderWidth / 2;
+          minZ = lz - hitBoxSize;
+          maxZ = lz + hitBoxSize;
+        } else { // X축 방향 면에 붙음 -> Z축으로 넓음
+          minX = lx - hitBoxSize;
+          maxX = lx + hitBoxSize;
+          minZ = lz - ladderWidth / 2;
+          maxZ = lz + ladderWidth / 2;
+        }
+
+        this.ladders.push({
+          minX: minX, maxX: maxX,
+          minZ: minZ, maxZ: maxZ,
+          minY: 0, maxY: bh // 바닥부터 건물 꼭대기까지
+        });
+      }
+    }
+
+    class Game {
+      constructor() { this.init(); }
+      init() {
+        this.scene = new THREE.Scene();
+        const skyColor = 0x1a1a2e;
+        this.scene.background = new THREE.Color(skyColor);
+        this.scene.fog = new THREE.Fog(skyColor, 50, 300);
+        this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 1000);
+        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(this.renderer.domElement);
+
+        this.physics = new PhysicsManager();
+        this.level = new Level(this);
+        this.enemyManager = new EnemyManager(this);
+        this.player = new Player(this, document.body);
+        this._setupUI();
+        this.clock = new THREE.Clock();
+        window.addEventListener('resize', () => this.onWindowResize());
+        this.animate();
+      }
+      _setupUI() {
+        const blocker = document.getElementById('blocker'), instructions = document.getElementById('instructions'), crosshair = document.getElementById('crosshair');
+        instructions.addEventListener('click', () => this.player.controls.lock());
+        this.player.controls.addEventListener('lock', () => { instructions.style.display = 'none'; blocker.style.display = 'none'; crosshair.style.display = 'block'; });
+        this.player.controls.addEventListener('unlock', () => { blocker.style.display = 'flex'; instructions.style.display = 'block'; crosshair.style.display = 'none'; });
+      }
+      onWindowResize() {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+      animate() {
+        requestAnimationFrame(() => this.animate());
+        const delta = this.clock.getDelta();
+        const time = this.clock.getElapsedTime();
+        this.physics.update(delta);
+        this.enemyManager.update(delta, this.player.body.position);
+
+        // [수정] update에 ladderData 전달
+        this.player.update(delta, time, this.level.meshes, this.enemyManager.getMeshList(), this.level.ladders);
+
+        this.renderer.render(this.scene, this.camera);
+      }
+    }
+    new Game();
+  </script>
+</body>
+
+</html>
