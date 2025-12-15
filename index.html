@@ -51,6 +51,36 @@
       height: 20px;
     }
 
+    #hp-bar-container {
+      position: absolute;
+      top: 20px;
+      right: 20px;
+      width: 300px;
+      height: 30px;
+      background-color: rgba(0, 0, 0, 0.5);
+      border: 2px solid #fff;
+      border-radius: 4px;
+    }
+
+    #hp-bar {
+      width: 100%;
+      height: 100%;
+      background-color: #ff0000;
+      /* 빨간색 체력바 */
+      transition: width 0.2s ease-out;
+    }
+
+    #ammo-display {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      font-size: 32px;
+      font-weight: bold;
+      color: #ffffff;
+      text-shadow: 2px 2px 2px #000;
+      font-family: 'Courier New', Courier, monospace;
+    }
+
     #blocker {
       position: absolute;
       width: 100%;
@@ -80,6 +110,10 @@
 
 <body>
   <div id="ui-layer">
+    <div id="hp-bar-container">
+      <div id="hp-bar"></div>
+    </div>
+    <div id="ammo-display">30 / 30</div>
     <div id="crosshair"></div>
   </div>
 
@@ -116,8 +150,16 @@
         this.scene = scene;
         this.fireRate = 0.1; this.nextFireTime = 0; this.isFiring = false;
         this.recoilAngle = 0; this.currentRecoilSim = 0; this.flashDuration = 0.08; this.flashTimer = 0;
+
+        // [추가] 탄약 시스템
+        this.maxAmmo = 30;
+        this.currentAmmo = 30;
+        this.isReloading = false;
+        this.ammoDisplay = document.getElementById('ammo-display');
+
         this.raycaster = new THREE.Raycaster(); this.raycaster.far = 200;
         this.mesh = this._createAK47();
+        this.updateAmmoUI();
       }
       _createAK47() {
         const gunGroup = new THREE.Group();
@@ -141,10 +183,47 @@
         gunGroup.add(this.flashLight);
         return gunGroup;
       }
-      startFiring() { this.isFiring = true; }
+      startFiring() {
+        if (!this.isReloading && this.currentAmmo > 0) this.isFiring = true;
+        else if (this.currentAmmo <= 0) this.reload(); // 총알 없으면 자동 재장전 시도 혹은 클릭 시 재장전
+      }
       stopFiring() { this.isFiring = false; }
+
+      reload() {
+        if (this.isReloading || this.currentAmmo === this.maxAmmo) return;
+        this.isReloading = true;
+        this.isFiring = false; // 재장전 중 사격 중지
+        this.updateAmmoUI();
+
+        // 2초 후 재장전 완료
+        setTimeout(() => {
+          this.currentAmmo = this.maxAmmo;
+          this.isReloading = false;
+          this.updateAmmoUI();
+        }, 2000);
+      }
+
+      updateAmmoUI() {
+        if (this.ammoDisplay) {
+          if (this.isReloading) {
+            this.ammoDisplay.innerText = "RELOADING...";
+            this.ammoDisplay.style.color = "yellow";
+          } else {
+            this.ammoDisplay.innerText = `${this.currentAmmo} / ${this.maxAmmo}`;
+            this.ammoDisplay.style.color = this.currentAmmo <= 5 ? "red" : "white";
+          }
+        }
+      }
+
       update(delta, time, targetObjects, pivot) {
-        if (this.isFiring && time >= this.nextFireTime) { this.fire(targetObjects, pivot); this.nextFireTime = time + this.fireRate; }
+        if (this.isFiring && time >= this.nextFireTime) {
+          if (this.currentAmmo > 0 && !this.isReloading) {
+            this.fire(targetObjects, pivot);
+            this.nextFireTime = time + this.fireRate;
+          } else {
+            this.isFiring = false;
+          }
+        }
         if (this.flashTimer > 0) { this.flashTimer -= delta; if (this.flashTimer <= 0) { this.flashMesh.visible = false; this.flashLight.intensity = 0; } }
         pivot.rotation.x -= this.recoilAngle;
         this.currentRecoilSim = THREE.MathUtils.lerp(this.currentRecoilSim, 0, delta * 10);
@@ -156,6 +235,8 @@
         }
       }
       fire(targetObjects, pivot) {
+        this.currentAmmo--;
+        this.updateAmmoUI();
         this.currentRecoilSim += 0.02; this.mesh.position.z += 0.15; this.mesh.rotation.x += 0.1;
         this.flashMesh.visible = true; this.flashMesh.rotation.z = Math.random() * Math.PI;
         this.flashMesh.scale.setScalar(0.8 + Math.random() * 0.5); this.flashLight.intensity = 3.0; this.flashTimer = this.flashDuration;
@@ -191,6 +272,11 @@
     class Zombie {
       constructor(game, startPosition) {
         this.game = game; this.health = 5; this.isDead = false; this.speed = 8 + Math.random() * 4;
+
+        // 피격 모션 변수
+        this.isHit = false;
+        this.hitTimer = 0;
+
         this.mesh = this._createMesh(); this.mesh.position.copy(startPosition); this.game.scene.add(this.mesh);
         this.body = new CANNON.Body({ mass: 40, position: new CANNON.Vec3(startPosition.x, startPosition.y, startPosition.z), shape: new CANNON.Sphere(1.0), material: game.physics.defaultMaterial, fixedRotation: true, linearDamping: 0.9 });
         this.game.physics.world.addBody(this.body);
@@ -201,8 +287,14 @@
         const clothesMat = new THREE.MeshStandardMaterial({ color: 0x3d3d3d, roughness: 0.9 });
         const body = new THREE.Mesh(new THREE.BoxGeometry(1.0, 1.4, 0.6), clothesMat); body.position.y = 0.7; body.castShadow = true;
         const head = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), skinMat); head.position.y = 1.7; head.castShadow = true;
+
         const leftArm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, 0.3), skinMat); leftArm.position.set(-0.65, 1.2, 0.4); leftArm.rotation.x = -Math.PI / 2;
         const rightArm = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, 0.3), skinMat); rightArm.position.set(0.65, 1.2, 0.4); rightArm.rotation.x = -Math.PI / 2;
+
+        // 팔 참조 저장
+        this.leftArm = leftArm;
+        this.rightArm = rightArm;
+
         group.add(body, head, leftArm, rightArm);
         group.traverse((child) => { if (child.isMesh) { child.userData.isEnemy = true; child.userData.entity = this; } });
         return group;
@@ -210,16 +302,38 @@
       takeDamage() {
         if (this.isDead) return;
         this.health--;
+
+        // 피격 모션 시작
+        this.isHit = true;
+        this.hitTimer = 0;
+
         this.mesh.children.forEach(child => { if (child.material) { const oldColor = child.material.color.getHex(); child.material.color.setHex(0xff0000); setTimeout(() => { if (!this.isDead && child.material) child.material.color.setHex(oldColor); }, 100); } });
         if (this.health <= 0) this.die(); else this.body.velocity.y += 5;
       }
       die() { this.isDead = true; this.mesh.rotation.x = -Math.PI / 2; this.mesh.position.y -= 0.5; this.game.physics.world.removeBody(this.body); }
-      update(playerPos) {
+      update(delta, playerPos) {
         if (this.isDead) return;
         this.mesh.position.copy(this.body.position); this.mesh.position.y -= 1.0;
         this.mesh.lookAt(playerPos.x, this.mesh.position.y, playerPos.z);
         const direction = new THREE.Vector3(playerPos.x - this.body.position.x, 0, playerPos.z - this.body.position.z).normalize();
         this.body.velocity.x = direction.x * this.speed; this.body.velocity.z = direction.z * this.speed;
+
+        // 피격 모션 업데이트 (팔 들썩이기)
+        if (this.isHit) {
+          this.hitTimer += delta;
+          const duration = 0.3; // 0.3초 동안 모션
+          if (this.hitTimer < duration) {
+            // 사인 파형으로 팔을 -90도(기본)에서 위로(-150도 정도) 들었다가 내림
+            // 0 ~ 1 -> 0 ~ PI
+            const angle = Math.sin((this.hitTimer / duration) * Math.PI) * 1.0;
+            this.leftArm.rotation.x = -Math.PI / 2 - angle;
+            this.rightArm.rotation.x = -Math.PI / 2 - angle;
+          } else {
+            this.isHit = false;
+            this.leftArm.rotation.x = -Math.PI / 2;
+            this.rightArm.rotation.x = -Math.PI / 2;
+          }
+        }
       }
     }
 
@@ -227,8 +341,29 @@
       constructor(game) { this.game = game; this.zombies = []; this.maxZombies = 10; this.spawnTimer = 0; this.spawnInterval = 2.0; }
       update(delta, playerPos) {
         for (let i = this.zombies.length - 1; i >= 0; i--) {
-          const zombie = this.zombies[i]; zombie.update(playerPos);
+          const zombie = this.zombies[i]; zombie.update(delta, playerPos);
           if (zombie.isDead) { if (!zombie.deathTimer) zombie.deathTimer = 0; zombie.deathTimer += delta; if (zombie.deathTimer > 2.0) { this.game.scene.remove(zombie.mesh); this.zombies.splice(i, 1); } }
+          else {
+            // 플레이어 공격 (거리 체크 - XZ 평면 + 높이 체크)
+            const dx = zombie.mesh.position.x - playerPos.x;
+            const dz = zombie.mesh.position.z - playerPos.z;
+            const distSq = dx * dx + dz * dz;
+
+            // 높이 차이 (대략적인 범위)
+            // playerPos는 body 중심, zombie.mesh는 보정된 위치이므로 약간의 오차 허용
+            const dy = Math.abs(zombie.mesh.position.y - playerPos.y);
+
+            // 사거리 2.5m (제곱값 6.25), 높이차 2.5m 이내
+            if (distSq < 6.25 && dy < 2.5) {
+              // 간단한 쿨타임 로직
+              if (!zombie.lastAttackTime) zombie.lastAttackTime = 0;
+              const now = performance.now();
+              if (now - zombie.lastAttackTime > 1000) { // 1초마다 공격
+                if (this.game.player) this.game.player.takeDamage(10);
+                zombie.lastAttackTime = now;
+              }
+            }
+          }
         }
         this.spawnTimer += delta;
         if (this.spawnTimer > this.spawnInterval) { this.spawnTimer = 0; if (this.zombies.length < this.maxZombies) this.spawnZombie(playerPos); }
@@ -268,6 +403,12 @@
         this.lastWKeyPressTime = 0;     // 마지막으로 W를 누른 시간
         this.walkSpeed = 25;            // 걷는 속도
         this.runSpeed = 50;             // 달리는 속도 (2배)
+
+        // [추가] 체력 관련 변수
+        this.maxHealth = 100;
+        this.health = this.maxHealth;
+        this.hpBar = document.getElementById('hp-bar');
+        this.isDead = false;
 
         this.weapon = new Weapon(game.scene);
         this.playerMesh = this._createPlayerMesh(); this.scene.add(this.playerMesh);
@@ -317,6 +458,7 @@
             case 'KeyA': this.input.left = true; break;
             case 'KeyS': this.input.backward = true; break;
             case 'KeyD': this.input.right = true; break;
+            case 'KeyR': this.weapon.reload(); break; // [추가] 재장전 키
             case 'Space': this.jump(); break;
             case 'Tab': e.preventDefault(); this.toggleView(); break;
           }
@@ -414,6 +556,27 @@
         const allTargets = levelMeshes.concat(enemyMeshes);
         this.weapon.update(delta, time, allTargets, this.pivot);
       }
+
+      takeDamage(amount) {
+        if (this.isDead) return;
+        this.health -= amount;
+        if (this.health < 0) this.health = 0;
+
+        this.updateHealthUI();
+
+        if (this.health <= 0) {
+          this.isDead = true;
+          alert('Game Over');
+          location.reload();
+        }
+      }
+
+      updateHealthUI() {
+        if (this.hpBar) {
+          const percentage = (this.health / this.maxHealth) * 100;
+          this.hpBar.style.width = `${percentage}%`;
+        }
+      }
     }
 
     // ==========================================
@@ -427,56 +590,189 @@
         this._initLights();
         this._initCity();
       }
+
+
+
       _initLights() {
-        const hemiLight = new THREE.HemisphereLight(0x6666ff, 0x444444, 1.5); this.game.scene.add(hemiLight);
-        const dirLight = new THREE.DirectionalLight(0xaaccff, 2.5); dirLight.position.set(50, 100, 50); dirLight.castShadow = true;
+        // 아침 분위기 조명
+        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0);
+        this.game.scene.add(hemiLight);
+
+        const dirLight = new THREE.DirectionalLight(0xfff0dd, 2.0); // 따뜻한 아침 햇살
+        dirLight.position.set(50, 100, 50);
+        dirLight.castShadow = true;
         dirLight.shadow.camera.left = -100; dirLight.shadow.camera.right = 100; dirLight.shadow.camera.top = 100; dirLight.shadow.camera.bottom = -100;
-        dirLight.shadow.mapSize.width = 2048; dirLight.shadow.mapSize.height = 2048; this.game.scene.add(dirLight);
+        dirLight.shadow.mapSize.width = 2048; dirLight.shadow.mapSize.height = 2048;
+        this.game.scene.add(dirLight);
       }
       createObject(mesh, body) { this.game.scene.add(mesh); this.game.physics.world.addBody(body); this.meshes.push(mesh); }
       _initCity() {
+        // 1. 바닥을 아스팔트 도로로 설정
         const groundGeo = new THREE.PlaneGeometry(1000, 1000);
-        const groundMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.8 });
-        const groundMesh = new THREE.Mesh(groundGeo, groundMat); groundMesh.rotation.x = -Math.PI / 2; groundMesh.receiveShadow = true;
-        this.game.scene.add(groundMesh); this.meshes.push(groundMesh);
+        const groundMat = new THREE.MeshStandardMaterial({
+          color: 0x1a1a1a, // 진한 아스팔트 색
+          roughness: 0.9
+        });
+        const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.receiveShadow = true;
+        this.game.scene.add(groundMesh);
+        this.meshes.push(groundMesh);
+
+        // 물리 바닥
         const groundBody = new CANNON.Body({ mass: 0, material: this.game.physics.defaultMaterial });
-        groundBody.addShape(new CANNON.Plane()); groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+        groundBody.addShape(new CANNON.Plane());
+        groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
         this.game.physics.world.addBody(groundBody);
 
-        const blockSize = 30, gridSize = 10;
+        const blockSize = 30; // 격자 크기
+        const streetWidth = 10; // 도로 폭
+        const sidewalkSize = blockSize - streetWidth; // 보도블럭 크기 (20)
+        const sidewalkHeight = 0.4; // 보도블럭 높이
+        const gridSize = 10;
+
         const buildingColors = [0x888888, 0x5a6a7a, 0x4c5e70, 0x666666, 0x3a4550];
+
+        // 보도블럭 재질 (콘크리트 느낌 + 테두리를 위한 약간의 밝은 톤)
+        const sidewalkMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.8 });
 
         for (let x = -gridSize; x <= gridSize; x++) {
           for (let z = -gridSize; z <= gridSize; z++) {
+            // 원점은 비워둠 (시작 지점)
             if (x === 0 && z === 0) continue;
-            if (Math.random() < 0.3) continue;
 
-            const posX = x * blockSize; const posZ = z * blockSize;
+            const posX = x * blockSize;
+            const posZ = z * blockSize;
+
+            // 2. 보도블럭(Sidewalk) 생성 - 살짝 튀어나오게
+            const swGeo = new THREE.BoxGeometry(sidewalkSize, sidewalkHeight, sidewalkSize);
+            const swMesh = new THREE.Mesh(swGeo, sidewalkMat);
+            swMesh.position.set(posX, sidewalkHeight / 2, posZ);
+            swMesh.receiveShadow = true;
+            swMesh.castShadow = true;
+            this.game.scene.add(swMesh);
+            this.meshes.push(swMesh);
+
+            // 보도블럭 물리 바디
+            const swBody = new CANNON.Body({ mass: 0, position: new CANNON.Vec3(posX, sidewalkHeight / 2, posZ), material: this.game.physics.defaultMaterial });
+            swBody.addShape(new CANNON.Box(new CANNON.Vec3(sidewalkSize / 2, sidewalkHeight / 2, sidewalkSize / 2)));
+            this.game.physics.world.addBody(swBody);
+
+
+            // 3. 건물 생성 (보도블럭 위에)
+            if (Math.random() < 0.3) continue; // 30% 확률로 빈 터 (공원이나 주차장 느낌이 됨)
+
             const isSkyscraper = Math.random() > 0.7;
+            // [수정] 20% 확률로 들어갈 수 있는 건물 생성
+            const isEnterable = Math.random() < 0.2;
+
             let width, depth, height;
-            if (isSkyscraper) { width = Math.random() * 10 + 10; depth = Math.random() * 10 + 10; height = Math.random() * 60 + 40; }
-            else { width = Math.random() * 5 + 20; depth = Math.random() * 5 + 20; height = Math.random() * 15 + 10; }
 
-            // 건물 생성
-            const geometry = new THREE.BoxGeometry(width, height, depth);
-            const color = buildingColors[Math.floor(Math.random() * buildingColors.length)];
-            const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.1 });
-            const mesh = new THREE.Mesh(geometry, material);
-            mesh.castShadow = true; mesh.receiveShadow = true;
-            mesh.position.set(posX, height / 2, posZ);
-            const body = new CANNON.Body({ mass: 0, position: new CANNON.Vec3(posX, height / 2, posZ), material: this.game.physics.defaultMaterial });
-            body.addShape(new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)));
-            this.createObject(mesh, body);
+            // 건물 크기는 보도블럭보다 작아야 함
+            const maxBldgSize = sidewalkSize - 2;
 
-            // [추가] 사다리 생성 (40% 확률)
-            if (Math.random() < 0.4) {
-              this._createLadder(posX, posZ, width, depth, height);
+            if (isSkyscraper) {
+              width = Math.random() * (maxBldgSize - 10) + 10;
+              depth = Math.random() * (maxBldgSize - 10) + 10;
+              height = Math.random() * 60 + 40;
+            } else {
+              width = Math.random() * (maxBldgSize - 10) + 10;
+              depth = Math.random() * (maxBldgSize - 10) + 10;
+              height = Math.random() * 15 + 10;
+            }
+
+            // 높이: 보도블럭 높이
+            const bldgY = sidewalkHeight;
+
+            if (isEnterable && width > 10) {
+              this._createEnterableBuilding(posX, posZ, width, depth, height, bldgY, buildingColors);
+              // 내부 건물에는 사다리 생성 안함 (혹은 내부에 만들 수도 있지만 생략)
+            } else {
+              // 일반 건물 (통짜 박스)
+              const geometry = new THREE.BoxGeometry(width, height, depth);
+              const color = buildingColors[Math.floor(Math.random() * buildingColors.length)];
+              const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.1 });
+              const mesh = new THREE.Mesh(geometry, material);
+              mesh.castShadow = true; mesh.receiveShadow = true;
+
+              // 중심점 보정: BoxGeometry는 중심이 (0,0,0)이므로 y위치를 (높이/2 + 시작높이)로 잡아야 함
+              mesh.position.set(posX, bldgY + height / 2, posZ);
+
+              const body = new CANNON.Body({ mass: 0, position: new CANNON.Vec3(posX, bldgY + height / 2, posZ), material: this.game.physics.defaultMaterial });
+              body.addShape(new CANNON.Box(new CANNON.Vec3(width / 2, height / 2, depth / 2)));
+              this.createObject(mesh, body);
+
+              // [사다리 생성] - 일반 건물만
+              if (Math.random() < 0.4) {
+                this._createLadder(posX, posZ, width, depth, height, sidewalkHeight);
+              }
             }
           }
         }
       }
 
-      _createLadder(bx, bz, bw, bd, bh) {
+      _createEnterableBuilding(x, z, w, d, h, y, colors) {
+        const thickness = 1.0;
+        const color = colors[Math.floor(Math.random() * colors.length)];
+        const material = new THREE.MeshStandardMaterial({ color: color, roughness: 0.2, metalness: 0.1, side: THREE.DoubleSide });
+
+        const group = new THREE.Group();
+        group.position.set(x, y, z);
+        this.game.scene.add(group);
+
+        // 물리 바디 (복합 형태)
+        const body = new CANNON.Body({ mass: 0, position: new CANNON.Vec3(x, y, z), material: this.game.physics.defaultMaterial });
+
+        // Helper to add wall
+        const addWall = (ww, wh, wd, px, py, pz) => {
+          const geo = new THREE.BoxGeometry(ww, wh, wd);
+          const mesh = new THREE.Mesh(geo, material);
+          mesh.position.set(px, py, pz);
+          mesh.castShadow = true; mesh.receiveShadow = true;
+          group.add(mesh);
+          this.meshes.push(mesh);
+
+          body.addShape(new CANNON.Box(new CANNON.Vec3(ww / 2, wh / 2, wd / 2)), new CANNON.Vec3(px, py, pz));
+        };
+
+        // 1. 바닥 (Floor)
+        // addWall(w, thickness, d, 0, thickness/2, 0); // 바닥은 이미 보도블럭이 있음
+
+        // 2. 천장 (Ceiling)
+        addWall(w, thickness, d, 0, h - thickness / 2, 0);
+
+        // 3. 뒷벽 (Back) -Z
+        addWall(w, h, thickness, 0, h / 2, -d / 2 + thickness / 2);
+
+        // 4. 왼쪽벽 (Left) -X
+        addWall(thickness, h, d, -w / 2 + thickness / 2, h / 2, 0);
+
+        // 5. 오른쪽벽 (Right) +X
+        addWall(thickness, h, d, w / 2 - thickness / 2, h / 2, 0);
+
+        // 6. 앞벽 (Front) +Z -> 문(Door) 구멍 뚫기
+        // 문 크기: 폭 6, 높이 5
+        const doorW = 6;
+        const doorH = 5;
+        const wallW = (w - doorW) / 2; // 문 좌우 벽 너비
+
+        // 앞벽 왼쪽
+        addWall(wallW, h, thickness, -w / 2 + wallW / 2, h / 2, d / 2 - thickness / 2);
+        // 앞벽 오른쪽
+        addWall(wallW, h, thickness, w / 2 - wallW / 2, h / 2, d / 2 - thickness / 2);
+        // 앞벽 위 (문 위쪽 헤더)
+        const headerH = h - doorH;
+        addWall(doorW, headerH, thickness, 0, doorH + headerH / 2, d / 2 - thickness / 2);
+
+        this.game.physics.world.addBody(body);
+
+        // 내부 조명 추가 (전략적 요충지 느낌)
+        const bulb = new THREE.PointLight(0xffaa00, 1, 20);
+        bulb.position.set(0, 4, 0);
+        group.add(bulb);
+      }
+
+      _createLadder(bx, bz, bw, bd, bh, groundY = 0) {
         // 건물 4면 중 한 곳 랜덤 선택
         // 0: +Z (Front), 1: -Z (Back), 2: +X (Right), 3: -X (Left)
         const side = Math.floor(Math.random() * 4);
@@ -514,7 +810,8 @@
         }
 
         ladderGroup.add(leftRail, rightRail);
-        ladderGroup.position.set(lx, 0, lz);
+        // 사다리는 보도블럭 위(groundY)에서 시작
+        ladderGroup.position.set(lx, groundY, lz);
         ladderGroup.rotation.y = rotationY;
         this.game.scene.add(ladderGroup);
         // 사다리 메쉬도 총알 충돌체에 포함 (원하면)
@@ -541,7 +838,7 @@
         this.ladders.push({
           minX: minX, maxX: maxX,
           minZ: minZ, maxZ: maxZ,
-          minY: 0, maxY: bh // 바닥부터 건물 꼭대기까지
+          minY: groundY, maxY: groundY + bh // 바닥부터 건물 꼭대기까지
         });
       }
     }
@@ -550,7 +847,8 @@
       constructor() { this.init(); }
       init() {
         this.scene = new THREE.Scene();
-        const skyColor = 0x1a1a2e;
+        // 아침 하늘색 (SkyBlue)
+        const skyColor = 0x87CEEB;
         this.scene.background = new THREE.Color(skyColor);
         this.scene.fog = new THREE.Fog(skyColor, 50, 300);
         this.camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.05, 1000);
